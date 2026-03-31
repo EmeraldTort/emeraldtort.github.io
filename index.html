@@ -1,0 +1,1755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#3d6b2e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="TortoiseCare">
+<link rel="manifest" href="manifest.json">
+<title>TortoiseCare</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, doc, setDoc, getDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+  // ── PASTE YOUR FIREBASE CONFIG BELOW ──
+const firebaseConfig = {
+  apiKey: "AIzaSyB9GzqXNu5R0GX_DGBZtxES0ui3JtaxBmg",
+  authDomain: "tortoisetracker-ca14c.firebaseapp.com",
+  projectId: "tortoisetracker-ca14c",
+  storageBucket: "tortoisetracker-ca14c.firebasestorage.app",
+  messagingSenderId: "76649147085",
+  appId: "1:76649147085:web:f88676d77ea22829269784",
+  measurementId: "G-R1QL8WVCZM"
+};
+  // ── END CONFIG ──
+
+  const app = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db = getFirestore(app);
+  const provider = new GoogleAuthProvider();
+
+  let syncUnsubscribe = null;
+  let currentUid = null;
+  let isSyncing = false;
+
+  window._fb = {
+    signIn: async () => {
+      try {
+        setSyncStatus('signing-in');
+        await signInWithPopup(auth, provider);
+      } catch(e) {
+        setSyncStatus('error');
+        console.error(e);
+      }
+    },
+    signOut: async () => {
+      if (syncUnsubscribe) { syncUnsubscribe(); syncUnsubscribe = null; }
+      currentUid = null;
+      await signOut(auth);
+      setSyncStatus('signed-out');
+    },
+    pushToCloud: async () => {
+      if (!currentUid) return;
+      try {
+        setSyncStatus('saving');
+        const toSave = { ...window._appState() };
+        // avatarImg can be large — store separately or skip if >900KB
+        const avatarImg = toSave.avatarImg;
+        delete toSave.avatarImg;
+        await setDoc(doc(db, 'tortoises', currentUid), { data: JSON.stringify(toSave), updatedAt: Date.now() });
+        if (avatarImg) {
+          // Store avatar in separate doc to avoid Firestore 1MB limit
+          try { await setDoc(doc(db, 'avatars', currentUid), { img: avatarImg }); } catch(e) {}
+        }
+        setSyncStatus('synced');
+      } catch(e) {
+        setSyncStatus('error');
+        console.error('Push error', e);
+      }
+    }
+  };
+
+  function setSyncStatus(status) {
+    window._syncStatus = status;
+    if (window._onSyncStatus) window._onSyncStatus(status);
+  }
+
+  onAuthStateChanged(auth, async (user) => {
+    if (user) {
+      currentUid = user.uid;
+      setSyncStatus('loading');
+
+      // Load from cloud first
+      try {
+        const snap = await getDoc(doc(db, 'tortoises', currentUid));
+        if (snap.exists()) {
+          const parsed = JSON.parse(snap.data().data);
+          window._mergeCloudState(parsed);
+        }
+        // Load avatar separately
+        try {
+          const aSnap = await getDoc(doc(db, 'avatars', currentUid));
+          if (aSnap.exists() && aSnap.data().img) {
+            window._setAvatarImg(aSnap.data().img);
+          }
+        } catch(e) {}
+      } catch(e) { console.error('Load error', e); }
+
+      setSyncStatus('synced');
+      window._onSignIn({ uid: user.uid, name: user.displayName, email: user.email, photo: user.photoURL });
+
+      // Listen for remote changes (other devices)
+      if (syncUnsubscribe) syncUnsubscribe();
+      syncUnsubscribe = onSnapshot(doc(db, 'tortoises', currentUid), (snap) => {
+        if (!snap.exists() || isSyncing) return;
+        const parsed = JSON.parse(snap.data().data);
+        window._mergeCloudState(parsed);
+        window._onRemoteUpdate();
+      });
+    } else {
+      currentUid = null;
+      setSyncStatus('signed-out');
+      window._onSignOut();
+    }
+  });
+</script>
+<style>
+  :root {
+    --green-deep: #2c5016;
+    --green-mid: #3d6b2e;
+    --green-light: #5a8c42;
+    --green-pale: #d4e8c2;
+    --green-bg: #f0f7e8;
+    --amber: #c97c1a;
+    --amber-pale: #fdf0d5;
+    --clay: #8b5a2b;
+    --clay-pale: #f5ece0;
+    --sky: #3a7ca5;
+    --sky-pale: #e1f0fa;
+    --red: #c0392b;
+    --red-pale: #fdecea;
+    --text: #1a2e0e;
+    --text-mid: #4a5e3a;
+    --text-soft: #7a8f6a;
+    --surface: #ffffff;
+    --surface-2: #f7faf3;
+    --border: rgba(60,100,40,0.15);
+    --shadow: 0 2px 12px rgba(44,80,22,0.10);
+    --radius: 14px;
+    --radius-sm: 8px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: var(--green-bg);
+    color: var(--text);
+    min-height: 100vh;
+    max-width: 480px;
+    margin: 0 auto;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  /* ── Header ── */
+  .header {
+    background: linear-gradient(150deg, var(--green-deep) 0%, var(--green-mid) 100%);
+    padding: 52px 20px 20px;
+    position: relative;
+    overflow: hidden;
+  }
+  .header::before {
+    content: '';
+    position: absolute;
+    top: -40px; right: -40px;
+    width: 160px; height: 160px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.05);
+  }
+  .header-top { display: flex; align-items: flex-start; justify-content: space-between; }
+  .header h1 { font-family: 'Playfair Display', serif; font-size: 26px; color: #fff; font-weight: 600; line-height: 1.2; }
+  .header .subtitle { font-size: 13px; color: rgba(255,255,255,0.7); margin-top: 2px; }
+  .tortoise-avatar {
+    width: 56px; height: 56px;
+    background: rgba(255,255,255,0.15);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 32px;
+    flex-shrink: 0;
+  }
+  .header-name-edit {
+    display: flex; align-items: center; gap: 6px; margin-top: 12px;
+  }
+  .tortoise-name {
+    font-family: 'Playfair Display', serif;
+    font-size: 20px; color: #fff; font-weight: 500;
+    cursor: pointer;
+    border-bottom: 1px dashed rgba(255,255,255,0.4);
+    padding-bottom: 1px;
+  }
+  .edit-name-btn { font-size: 14px; color: rgba(255,255,255,0.6); cursor: pointer; background: none; border: none; }
+
+  /* ── Today banner ── */
+  .today-bar {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 10px 20px;
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; color: var(--text-soft);
+  }
+  .today-bar strong { color: var(--text); }
+
+  /* ── Nav ── */
+  nav {
+    position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+    width: 100%; max-width: 480px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    display: flex;
+    z-index: 100;
+    padding-bottom: env(safe-area-inset-bottom, 0);
+  }
+  .nav-btn {
+    flex: 1; display: flex; flex-direction: column; align-items: center;
+    gap: 3px; padding: 10px 4px 8px;
+    background: none; border: none; cursor: pointer;
+    font-size: 10px; font-family: 'DM Sans', sans-serif;
+    color: var(--text-soft); transition: color 0.2s;
+  }
+  .nav-btn svg { width: 22px; height: 22px; }
+  .nav-btn.active { color: var(--green-mid); }
+  .nav-btn.active svg path, .nav-btn.active svg circle, .nav-btn.active svg rect, .nav-btn.active svg polyline { stroke: var(--green-mid) !important; }
+
+  /* ── Pages ── */
+  .page { display: none; padding: 16px 16px 90px; }
+  .page.active { display: block; }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface);
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    padding: 16px;
+    margin-bottom: 12px;
+    box-shadow: var(--shadow);
+  }
+  .card-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 16px; font-weight: 500;
+    color: var(--text); margin-bottom: 8px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .card-title .icon {
+    width: 28px; height: 28px;
+    border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; flex-shrink: 0;
+  }
+  .icon-green { background: var(--green-pale); }
+  .icon-amber { background: var(--amber-pale); }
+  .icon-clay { background: var(--clay-pale); }
+  .icon-sky { background: var(--sky-pale); }
+  .icon-red { background: var(--red-pale); }
+
+  /* ── Section headings ── */
+  .section-head {
+    font-family: 'Playfair Display', serif;
+    font-size: 18px; font-weight: 500;
+    color: var(--text); margin: 20px 0 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-head:first-child { margin-top: 0; }
+
+  /* ── Task / Schedule ── */
+  .task-item {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .task-item:last-child { border-bottom: none; padding-bottom: 0; }
+  .task-check {
+    width: 22px; height: 22px; border-radius: 50%;
+    border: 2px solid var(--green-light);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; cursor: pointer; transition: all 0.2s;
+  }
+  .task-check.done { background: var(--green-light); border-color: var(--green-light); }
+  .task-check.done::after { content: '✓'; color: white; font-size: 12px; font-weight: 700; }
+  .task-label { flex: 1; font-size: 14px; }
+  .task-label.done { text-decoration: line-through; color: var(--text-soft); }
+  .task-freq { font-size: 11px; color: var(--text-soft); background: var(--surface-2); padding: 2px 8px; border-radius: 10px; }
+  .task-overdue { font-size: 11px; color: var(--red); font-weight: 500; }
+
+  /* ── Pill badges ── */
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 20px;
+    font-size: 11px; font-weight: 500;
+  }
+  .badge-green { background: var(--green-pale); color: var(--green-deep); }
+  .badge-amber { background: var(--amber-pale); color: #7a4800; }
+  .badge-red { background: var(--red-pale); color: var(--red); }
+
+  /* ── Guide accordion ── */
+  .guide-item { border-bottom: 1px solid var(--border); }
+  .guide-item:last-child { border-bottom: none; }
+  .guide-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0; cursor: pointer;
+    font-size: 14px; font-weight: 500; color: var(--text);
+    user-select: none;
+  }
+  .guide-header .g-left { display: flex; align-items: center; gap: 10px; }
+  .guide-arrow { font-size: 12px; color: var(--text-soft); transition: transform 0.25s; }
+  .guide-arrow.open { transform: rotate(90deg); }
+  .guide-body {
+    font-size: 13.5px; line-height: 1.65; color: var(--text-mid);
+    max-height: 0; overflow: hidden; transition: max-height 0.35s ease;
+  }
+  .guide-body.open { max-height: 2000px; }
+  .guide-body-inner { padding: 0 0 14px 38px; }
+  .guide-body-inner ul { padding-left: 18px; }
+  .guide-body-inner li { margin-bottom: 5px; }
+  .guide-body-inner strong { color: var(--text); font-weight: 500; }
+  .guide-body-inner .warn {
+    background: var(--amber-pale); border-left: 3px solid var(--amber);
+    padding: 8px 10px; border-radius: 0 6px 6px 0; margin: 8px 0;
+    font-size: 13px;
+  }
+  .guide-body-inner .danger {
+    background: var(--red-pale); border-left: 3px solid var(--red);
+    padding: 8px 10px; border-radius: 0 6px 6px 0; margin: 8px 0;
+    font-size: 13px;
+  }
+  .guide-body-inner .good {
+    background: var(--green-pale); border-left: 3px solid var(--green-light);
+    padding: 8px 10px; border-radius: 0 6px 6px 0; margin: 8px 0;
+    font-size: 13px;
+  }
+  .guide-body-inner .info-table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+  .guide-body-inner .info-table td { padding: 5px 8px; border: 1px solid var(--border); font-size: 13px; }
+  .guide-body-inner .info-table td:first-child { font-weight: 500; color: var(--text); background: var(--surface-2); width: 45%; }
+
+  /* ── Feeding log ── */
+  .food-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+  .food-chip {
+    padding: 8px 10px; border-radius: var(--radius-sm);
+    font-size: 13px; cursor: pointer; text-align: center;
+    border: 1.5px solid transparent; transition: all 0.15s;
+    display: flex; align-items: center; gap: 6px; justify-content: center;
+  }
+  .food-chip.safe { background: var(--green-bg); border-color: var(--green-pale); color: var(--green-deep); }
+  .food-chip.safe:hover { background: var(--green-pale); }
+  .food-chip.caution { background: var(--amber-pale); border-color: #f5d5a0; color: #7a4800; }
+  .food-chip.avoid { background: var(--red-pale); border-color: #f5c0bc; color: var(--red); }
+
+  .food-log-entry {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .food-log-entry:last-child { border-bottom: none; }
+  .food-log-time { color: var(--text-soft); font-size: 12px; }
+  .delete-btn { color: var(--text-soft); cursor: pointer; font-size: 16px; background: none; border: none; padding: 0 4px; }
+
+  /* ── Health log ── */
+  .health-entry {
+    display: flex; gap: 12px;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .health-entry:last-child { border-bottom: none; }
+  .health-dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    flex-shrink: 0; margin-top: 5px;
+  }
+  .health-dot.good { background: var(--green-light); }
+  .health-dot.concern { background: var(--amber); }
+  .health-dot.vet { background: var(--sky); }
+  .health-content { flex: 1; }
+  .health-date { font-size: 11px; color: var(--text-soft); }
+  .health-note { font-size: 13.5px; margin-top: 2px; }
+  .health-category { font-size: 11px; color: var(--text-soft); margin-top: 2px; }
+
+  /* ── Inputs & Buttons ── */
+  input[type=text], input[type=date], input[type=number], textarea, select {
+    width: 100%; padding: 10px 12px;
+    border: 1.5px solid var(--border);
+    border-radius: var(--radius-sm); background: var(--surface-2);
+    font-family: 'DM Sans', sans-serif; font-size: 14px; color: var(--text);
+    outline: none; transition: border-color 0.2s;
+    -webkit-appearance: none;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--green-light); background: #fff; }
+  textarea { resize: vertical; min-height: 80px; }
+
+  .btn {
+    padding: 11px 20px; border-radius: var(--radius-sm);
+    font-family: 'DM Sans', sans-serif; font-size: 14px; font-weight: 500;
+    cursor: pointer; border: none; transition: all 0.2s; display: inline-block;
+  }
+  .btn-primary { background: var(--green-mid); color: #fff; }
+  .btn-primary:hover { background: var(--green-deep); }
+  .btn-secondary { background: var(--surface-2); color: var(--text); border: 1.5px solid var(--border); }
+  .btn-block { width: 100%; text-align: center; }
+  .btn-sm { padding: 7px 14px; font-size: 13px; }
+
+  /* ── Modal ── */
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    z-index: 200; align-items: flex-end; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--surface); width: 100%; max-width: 480px;
+    border-radius: var(--radius) var(--radius) 0 0;
+    padding: 20px 20px calc(20px + env(safe-area-inset-bottom, 0));
+    max-height: 90vh; overflow-y: auto;
+  }
+  .modal-title {
+    font-family: 'Playfair Display', serif; font-size: 18px;
+    font-weight: 500; margin-bottom: 16px;
+  }
+  .form-group { margin-bottom: 14px; }
+  .form-label { font-size: 13px; font-weight: 500; color: var(--text-mid); margin-bottom: 5px; display: block; }
+  .form-row { display: flex; gap: 10px; }
+  .form-row > * { flex: 1; }
+
+  /* ── Stats row ── */
+  .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius-sm); padding: 12px;
+    box-shadow: var(--shadow);
+  }
+  .stat-label { font-size: 11px; color: var(--text-soft); margin-bottom: 4px; }
+  .stat-value { font-size: 22px; font-weight: 500; color: var(--text); }
+  .stat-unit { font-size: 12px; color: var(--text-soft); }
+
+  /* ── Empty state ── */
+  .empty { text-align: center; padding: 32px 16px; color: var(--text-soft); font-size: 14px; }
+  .empty-icon { font-size: 36px; margin-bottom: 8px; }
+
+  /* ── Vet reminder strip ── */
+  .reminder-strip {
+    background: var(--sky-pale); border: 1px solid #b3d6ef;
+    border-radius: var(--radius-sm); padding: 10px 14px;
+    font-size: 13px; color: #1d4f70; margin-bottom: 10px;
+    display: flex; align-items: center; gap: 8px;
+  }
+
+  /* ── Toggle chips ── */
+  .toggle-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .toggle-chip {
+    padding: 5px 12px; border-radius: 20px; font-size: 13px;
+    border: 1.5px solid var(--border); background: var(--surface-2);
+    color: var(--text-mid); cursor: pointer; transition: all 0.15s;
+  }
+  .toggle-chip.active { background: var(--green-pale); border-color: var(--green-light); color: var(--green-deep); font-weight: 500; }
+
+  /* ── Hibernation countdown ── */
+  .hibernate-banner {
+    background: linear-gradient(135deg, var(--green-deep), var(--green-mid));
+    border-radius: var(--radius); padding: 16px; color: #fff; margin-bottom: 12px;
+    display: flex; align-items: center; gap: 14px;
+  }
+  .hibernate-icon { font-size: 36px; }
+  .hibernate-text h3 { font-family: 'Playfair Display', serif; font-size: 16px; font-weight: 500; }
+  .hibernate-text p { font-size: 12px; opacity: 0.8; margin-top: 3px; }
+
+  /* ── Schedule add btn ── */
+  .fab {
+    position: fixed; bottom: 74px; right: 50%;
+    transform: translateX(calc(50% - 20px + 210px));
+    width: 48px; height: 48px; border-radius: 50%;
+    background: var(--green-mid); color: #fff; border: none;
+    font-size: 26px; cursor: pointer; box-shadow: 0 4px 16px rgba(61,107,46,0.35);
+    display: flex; align-items: center; justify-content: center; z-index: 99;
+  }
+  .fab.hidden { display: none; }
+
+  /* ── Name modal ── */
+  #name-modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 300; align-items: center; justify-content: center;
+  }
+  #name-modal-overlay.open { display: flex; }
+  #name-modal {
+    background: var(--surface); border-radius: var(--radius);
+    padding: 24px; width: 300px;
+  }
+
+  /* Feed search */
+  #food-search-wrap { position: relative; margin-bottom: 10px; }
+  #food-search { padding-left: 32px; }
+  #food-search-icon { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-soft); font-size: 14px; pointer-events: none; }
+
+  .food-category-label { font-size: 11px; font-weight: 500; color: var(--text-soft); text-transform: uppercase; letter-spacing: 0.05em; margin: 12px 0 6px; }
+
+  .health-symptom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 8px; }
+  .symptom-chip {
+    padding: 7px 10px; border-radius: var(--radius-sm); font-size: 12px;
+    border: 1.5px solid var(--border); background: var(--surface-2);
+    cursor: pointer; text-align: center; transition: all 0.15s;
+  }
+  .symptom-chip.selected { background: var(--sky-pale); border-color: #a0c8e8; color: #1d4f70; }
+
+  .tab-row { display: flex; gap: 6px; margin-bottom: 14px; }
+  .tab {
+    flex: 1; padding: 8px; text-align: center; border-radius: var(--radius-sm);
+    font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s;
+    background: var(--surface-2); border: 1.5px solid var(--border); color: var(--text-soft);
+  }
+  .tab.active { background: var(--green-pale); border-color: var(--green-light); color: var(--green-deep); }
+  /* ── Sync / Auth ── */
+  .sync-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 16px; font-size: 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .sync-status { display: flex; align-items: center; gap: 6px; }
+  .sync-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .sync-dot.synced { background: var(--green-light); }
+  .sync-dot.saving { background: var(--amber); animation: pulse 1s infinite; }
+  .sync-dot.loading { background: var(--amber); animation: pulse 1s infinite; }
+  .sync-dot.error { background: var(--red); }
+  .sync-dot.signed-out { background: #ccc; }
+  .sync-dot.signing-in { background: var(--amber); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+  .sync-user { display: flex; align-items: center; gap: 6px; }
+  .sync-user-photo { width: 22px; height: 22px; border-radius: 50%; object-fit: cover; }
+  .sync-btn {
+    font-size: 12px; padding: 4px 12px; border-radius: 20px;
+    border: 1.5px solid var(--border); background: var(--surface-2);
+    color: var(--text-mid); cursor: pointer; font-family: inherit; transition: all 0.15s;
+  }
+  .sync-btn:hover { background: var(--green-pale); border-color: var(--green-light); color: var(--green-deep); }
+  .sync-btn.sign-in { background: #fff; border-color: #ddd; display: flex; align-items: center; gap: 6px; }
+  .google-icon { width: 14px; height: 14px; }
+
+  /* ── Setup banner ── */
+  .setup-banner {
+    background: var(--amber-pale); border: 1px solid #f0c97a;
+    border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 12px;
+    font-size: 13px; color: #7a4800;
+  }
+  .setup-banner h4 { font-size: 13px; font-weight: 500; margin-bottom: 4px; }
+  .setup-banner ol { padding-left: 18px; margin-top: 6px; }
+  .setup-banner li { margin-bottom: 4px; }
+  .setup-banner code { background: rgba(0,0,0,0.07); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+  .setup-banner a { color: #7a4800; }
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ── -->
+<div class="header">
+  <div class="header-top">
+    <div>
+      <div class="header-name-edit">
+        <span class="tortoise-name" id="tortoise-name-display" onclick="openNameModal()">My Tortoise</span>
+        <button class="edit-name-btn" onclick="openNameModal()">✏️</button>
+      </div>
+      <div class="subtitle">Horsefield Tortoise Care</div>
+    </div>
+    <div class="tortoise-avatar" id="tortoise-avatar" onclick="openAvatarPicker()" title="Tap to change photo" style="cursor:pointer;overflow:hidden;position:relative;">
+    <img id="avatar-img" src="" alt="" style="display:none;width:100%;height:100%;object-fit:cover;border-radius:50%;">
+    <span id="avatar-emoji">🐢</span>
+    <div style="position:absolute;bottom:0;right:0;width:18px;height:18px;background:var(--green-light);border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;border:2px solid rgba(255,255,255,0.8);">✏️</div>
+  </div>
+  </div>
+</div>
+
+<!-- ── SYNC BAR ── -->
+<div class="sync-bar" id="sync-bar">
+  <div class="sync-status">
+    <div class="sync-dot signed-out" id="sync-dot"></div>
+    <span id="sync-label" style="color:var(--text-soft)">Not signed in</span>
+  </div>
+  <div id="sync-action">
+    <button class="sync-btn sign-in" onclick="fbSignIn()">
+      <svg class="google-icon" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>
+      Sign in with Google
+    </button>
+  </div>
+</div>
+
+<div class="today-bar">
+  📅 <span id="today-label">Loading...</span>
+</div>
+
+<!-- ── PAGES ── -->
+
+<!-- HOME / DASHBOARD -->
+<div class="page active" id="page-home">
+
+  <div id="setup-banner" class="setup-banner" style="display:none">
+  <h4>⚙️ Firebase setup required for sync</h4>
+  <p>To enable Google sync, create a free Firebase project and paste your config into the app:</p>
+  <ol>
+    <li>Go to <a href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a></li>
+    <li>Create a project → Add a <strong>Web app</strong></li>
+    <li>Enable <strong>Authentication → Google</strong> sign-in method</li>
+    <li>Enable <strong>Firestore Database</strong> (start in test mode)</li>
+    <li>Copy your config object and paste it into the <code>firebaseConfig</code> section near the top of <code>index.html</code></li>
+  </ol>
+</div>
+<div id="hibernate-banner-wrap"></div>
+
+  <div class="section-head">Today's Tasks</div>
+  <div class="card" id="daily-tasks-card">
+    <div id="daily-tasks-list"></div>
+  </div>
+
+  <div class="section-head">Upcoming</div>
+  <div class="card" id="upcoming-tasks-card">
+    <div id="upcoming-tasks-list"></div>
+  </div>
+
+  <div class="section-head">Quick Stats</div>
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Last fed</div>
+      <div class="stat-value" id="stat-last-fed">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Last bath</div>
+      <div class="stat-value" id="stat-last-bath">—</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Health logs</div>
+      <div class="stat-value" id="stat-health-count">0</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Days tracked</div>
+      <div class="stat-value" id="stat-days-tracked">0</div>
+    </div>
+  </div>
+
+  <div class="reminder-strip">
+    🌡️ <span>Basking spot should be <strong>35–40°C</strong>, cool end <strong>20–25°C</strong> daily</span>
+  </div>
+  <div class="reminder-strip" style="background:var(--amber-pale);border-color:#f5d5a0;color:#7a4800;">
+    ☀️ <span>UVB lamp must be replaced every <strong>6–12 months</strong> even if still lit</span>
+  </div>
+
+</div>
+
+<!-- SCHEDULE -->
+<div class="page" id="page-schedule">
+  <div class="tab-row">
+    <div class="tab active" id="sched-tab-tasks" onclick="schedTab('tasks')">Tasks</div>
+    <div class="tab" id="sched-tab-log" onclick="schedTab('log')">History</div>
+  </div>
+  <div id="sched-tasks-panel">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div class="section-head" style="margin:0">All Scheduled Tasks</div>
+      <button id="manage-btn" class="btn btn-secondary btn-sm" onclick="toggleManageMode()">Manage Tasks</button>
+    </div>
+    <div class="card" id="all-tasks-list"></div>
+    <button class="btn btn-primary btn-block" onclick="openAddTask()">+ Add Custom Task</button>
+  </div>
+  <div id="sched-log-panel" style="display:none">
+    <div class="section-head">Task History</div>
+    <div class="card" id="task-history-list"></div>
+  </div>
+</div>
+
+<!-- FEEDING -->
+<div class="page" id="page-feeding">
+  <div class="tab-row">
+    <div class="tab active" id="feed-tab-log" onclick="feedTab('log')">Log Food</div>
+    <div class="tab" id="feed-tab-guide" onclick="feedTab('guide')">Food Guide</div>
+  </div>
+
+  <div id="feed-log-panel">
+    <div class="section-head">Log Today's Feeding</div>
+    <div class="card">
+      <div id="food-search-wrap">
+        <span id="food-search-icon">🔍</span>
+        <input type="text" id="food-search" placeholder="Search food..." oninput="filterFoods()">
+      </div>
+      <div id="food-chips-container"></div>
+      <div style="margin-top:12px">
+        <div class="form-group">
+          <label class="form-label">Notes (optional)</label>
+          <input type="text" id="feed-notes" placeholder="e.g. ate well, ignored parsley">
+        </div>
+        <button class="btn btn-primary btn-block" onclick="logFeeding()">Log Feeding</button>
+      </div>
+    </div>
+
+    <div class="section-head">Recent Feedings</div>
+    <div class="card" id="feeding-history"></div>
+  </div>
+
+  <div id="feed-guide-panel" style="display:none">
+    <div class="card">
+      <div class="guide-item" onclick="toggleGuide('feed-g1')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-green">🌿</span> Staple Weeds & Plants</div><span class="guide-arrow" id="arr-feed-g1">▶</span></div>
+        <div class="guide-body" id="guide-feed-g1">
+          <div class="guide-body-inner">
+            <div class="good">These should form the <strong>majority (80%+)</strong> of your Horsefield's diet. Wild weeds are ideal — free, nutritious, and natural.</div>
+            <ul>
+              <li><strong>Dandelion</strong> (Taraxacum officinale) — entire plant including flowers. Excellent calcium source.</li>
+              <li><strong>Plantain</strong> (Plantago major / lanceolata) — leaves and seed heads.</li>
+              <li><strong>Clover</strong> (Trifolium spp.) — leaves and flowers. High in calcium.</li>
+              <li><strong>Sow thistle</strong> (Sonchus spp.) — very nutritious.</li>
+              <li><strong>Hawkbit / Hawkweed</strong> — dandelion-like weeds, excellent.</li>
+              <li><strong>Mallow</strong> (Malva spp.) — leaves and flowers.</li>
+              <li><strong>Chicory</strong> (Cichorium intybus) — leaves.</li>
+              <li><strong>Bindweed</strong> (Calystegia / Convolvulus) — leaves only.</li>
+              <li><strong>Milk thistle</strong> — leaves (watch for spines with young tortoises).</li>
+              <li><strong>Opuntia cactus pads</strong> — excellent, spine-free pads only.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="guide-item" onclick="toggleGuide('feed-g2')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-amber">🥬</span> Occasional Vegetables</div><span class="guide-arrow" id="arr-feed-g2">▶</span></div>
+        <div class="guide-body" id="guide-feed-g2">
+          <div class="guide-body-inner">
+            <div class="warn">Use these sparingly — no more than <strong>10–15%</strong> of total diet. High water content can cause loose stools.</div>
+            <ul>
+              <li><strong>Dark leafy greens</strong>: kale, spring greens, watercress, rocket</li>
+              <li><strong>Endive / Escarole</strong> — good calcium:phosphorus ratio</li>
+              <li><strong>Lambs lettuce</strong> — fine in small amounts</li>
+              <li><strong>Red / green lettuce</strong> — small amounts only (mostly water)</li>
+              <li><strong>Pumpkin / squash leaves</strong> — occasional</li>
+              <li><strong>Edible flowers</strong>: rose petals, hibiscus, cornflower, marigold</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="guide-item" onclick="toggleGuide('feed-g3')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-red">⚠️</span> Foods to Avoid</div><span class="guide-arrow" id="arr-feed-g3">▶</span></div>
+        <div class="guide-body" id="guide-feed-g3">
+          <div class="guide-body-inner">
+            <div class="danger">These can cause serious harm — some are toxic. <strong>Never feed these.</strong></div>
+            <ul>
+              <li><strong>Fruit</strong> — Horsefields are from arid steppes and are not adapted to sugar. Fruit feeds gut bacteria that produce gas and can cause fatal bloating.</li>
+              <li><strong>Spinach & beetroot leaves</strong> — high oxalic acid binds calcium → MBD</li>
+              <li><strong>Iceberg lettuce</strong> — almost zero nutrition, causes diarrhoea</li>
+              <li><strong>Brassicas in excess</strong> (cabbage, broccoli, Brussels) — goitrogenic, disrupt thyroid</li>
+              <li><strong>Rhubarb</strong> — toxic</li>
+              <li><strong>Avocado</strong> — toxic</li>
+              <li><strong>Onion, garlic, leek</strong> — toxic</li>
+              <li><strong>Mushrooms</strong> — not a natural food, avoid</li>
+              <li><strong>Beans & legumes</strong> — too high in protein, causes kidney damage long-term</li>
+              <li><strong>Any animal protein</strong> — Horsefields are herbivores</li>
+              <li><strong>Dog/cat food</strong> — toxic, far too high in protein</li>
+              <li><strong>Bread, pasta, rice</strong> — processed, harmful</li>
+              <li><strong>Buttercup</strong> — toxic</li>
+              <li><strong>Foxglove</strong> — highly toxic</li>
+              <li><strong>Daffodil / Narcissus</strong> — toxic</li>
+              <li><strong>Nightshade family</strong> (potato tops, tomato leaves) — toxic</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="guide-item" onclick="toggleGuide('feed-g4')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-sky">💧</span> Calcium & Supplements</div><span class="guide-arrow" id="arr-feed-g4">▶</span></div>
+        <div class="guide-body" id="guide-feed-g4">
+          <div class="guide-body-inner">
+            <p>Calcium is critical for shell and bone development.</p>
+            <ul>
+              <li><strong>Cuttlebone</strong>: leave a piece in the enclosure at all times. The tortoise will gnaw on it as needed.</li>
+              <li><strong>Calcium powder</strong>: dust food lightly 2–3× per week (plain calcium carbonate, no D3 — UVB provides D3).</li>
+              <li><strong>Limestone flour</strong>: can be sprinkled on food.</li>
+              <li>A varied weed-based diet usually provides enough calcium without heavy supplementation.</li>
+              <li>Avoid supplements with D3 if providing adequate UVB — vitamin D3 toxicity is possible.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="guide-item" onclick="toggleGuide('feed-g5')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-green">📅</span> Feeding Schedule</div><span class="guide-arrow" id="arr-feed-g5">▶</span></div>
+        <div class="guide-body" id="guide-feed-g5">
+          <div class="guide-body-inner">
+            <table class="info-table">
+              <tr><td>Adult tortoise</td><td>Feed <strong>5–6 days per week</strong>. One rest day is fine.</td></tr>
+              <tr><td>Juvenile (&lt;5 years)</td><td>Feed <strong>daily</strong> — growing rapidly.</td></tr>
+              <tr><td>Portion size</td><td>Roughly the size of the tortoise's shell in volume.</td></tr>
+              <tr><td>Time of day</td><td>Mid-morning after basking to warm up digestion.</td></tr>
+              <tr><td>Fasting</td><td>Do not fast for more than 2 days unless pre-hibernation.</td></tr>
+            </table>
+            <div class="warn">Never feed a cold tortoise. They must be warm enough (basking first) for digestion to work. Undigested food rots in the gut.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- HEALTH LOG -->
+<div class="page" id="page-health">
+  <div class="tab-row">
+    <div class="tab active" id="health-tab-log" onclick="healthTab('log')">Log Entry</div>
+    <div class="tab" id="health-tab-history" onclick="healthTab('history')">History</div>
+    <div class="tab" id="health-tab-signs" onclick="healthTab('signs')">Warning Signs</div>
+  </div>
+
+  <div id="health-log-panel">
+    <div class="card">
+      <div class="form-group">
+        <label class="form-label">Category</label>
+        <select id="health-category">
+          <option value="general">General observation</option>
+          <option value="weight">Weight / growth</option>
+          <option value="eating">Eating behaviour</option>
+          <option value="activity">Activity & movement</option>
+          <option value="eyes">Eyes / nose / mouth</option>
+          <option value="shell">Shell condition</option>
+          <option value="stools">Droppings</option>
+          <option value="vet">Vet visit</option>
+          <option value="medication">Medication</option>
+          <option value="concern">Concern / symptom</option>
+        </select>
+      </div>
+      <div class="form-group form-row">
+        <div>
+          <label class="form-label">Date</label>
+          <input type="date" id="health-date">
+        </div>
+        <div>
+          <label class="form-label">Weight (g)</label>
+          <input type="number" id="health-weight" placeholder="e.g. 450">
+        </div>
+      </div>
+      <div class="form-group">
+        <label class="form-label">Notes</label>
+        <textarea id="health-notes" placeholder="Describe what you observed..."></textarea>
+      </div>
+      <button class="btn btn-primary btn-block" onclick="addHealthEntry()">Save Entry</button>
+    </div>
+  </div>
+
+  <div id="health-history-panel" style="display:none">
+    <div class="section-head">Health Log</div>
+    <div class="card" id="health-entries-list"></div>
+  </div>
+
+  <div id="health-signs-panel" style="display:none">
+    <div class="card">
+      <div class="guide-item" onclick="toggleGuide('h-g1')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-red">🚨</span> Seek Vet Immediately</div><span class="guide-arrow" id="arr-h-g1">▶</span></div>
+        <div class="guide-body" id="guide-h-g1">
+          <div class="guide-body-inner">
+            <div class="danger">These are emergencies. Contact a reptile vet <strong>same day</strong>.</div>
+            <ul>
+              <li><strong>Runny nose / nasal discharge</strong> — could be Runny Nose Syndrome (RNS), a respiratory infection</li>
+              <li><strong>Open-mouth breathing or wheezing</strong> — respiratory distress</li>
+              <li><strong>Eyes swollen shut or sunken</strong> — dehydration or infection</li>
+              <li><strong>Mouth gaping or foaming</strong> — possible stomatitis</li>
+              <li><strong>Shell soft, crumbling, or pitting</strong> — Metabolic Bone Disease or shell rot</li>
+              <li><strong>Pyramid-shaped scutes that are excessive</strong> — permanent but can indicate past/present husbandry issues</li>
+              <li><strong>Not moving for several days (when not hibernating)</strong></li>
+              <li><strong>Prolapsed organ</strong> — keep moist, emergency</li>
+              <li><strong>Sudden weight loss</strong></li>
+              <li><strong>Blood in urine or faeces</strong></li>
+              <li><strong>Limb swelling or lameness</strong></li>
+              <li><strong>Tortoise found upside down and very lethargic</strong> — possible injury</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="guide-item" onclick="toggleGuide('h-g2')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-amber">⚠️</span> Monitor Closely</div><span class="guide-arrow" id="arr-h-g2">▶</span></div>
+        <div class="guide-body" id="guide-h-g2">
+          <div class="guide-body-inner">
+            <div class="warn">These warrant observation. Seek vet advice if they persist beyond a day or two.</div>
+            <ul>
+              <li><strong>Refusing food</strong> — 2–3 days in active season. Check temperatures first.</li>
+              <li><strong>Spending all day buried / hiding</strong> — check temps; may be too cold</li>
+              <li><strong>Loose or watery droppings</strong> — check diet for excess water-content veg or fruit</li>
+              <li><strong>White chalky urates appearing orange or yellow</strong> — dehydration; increase baths</li>
+              <li><strong>Scratching at eyes</strong> — check for substrate in eyes or infection</li>
+              <li><strong>Uneven walking or head tilt</strong></li>
+              <li><strong>Lethargy outside hibernation</strong></li>
+            </ul>
+          </div>
+        </div>
+      </div>
+      <div class="guide-item" onclick="toggleGuide('h-g3')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-green">✅</span> Signs of Good Health</div><span class="guide-arrow" id="arr-h-g3">▶</span></div>
+        <div class="guide-body" id="guide-h-g3">
+          <div class="guide-body-inner">
+            <div class="good">A healthy Horsefield tortoise should:</div>
+            <ul>
+              <li>Have bright, clear, alert eyes</li>
+              <li>Have a dry, clean nose with no discharge</li>
+              <li>Be active during the warmer part of the day</li>
+              <li>Have a hard, well-formed shell (slight pyramiding may be normal in captive-bred animals)</li>
+              <li>Pass solid, dark droppings with chalky white urates</li>
+              <li>Show interest in food</li>
+              <li>Bask regularly under the heat/UVB lamp</li>
+              <li>Gain weight steadily (weigh monthly)</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- GUIDES -->
+<div class="page" id="page-guides">
+  <div class="toggle-chips" id="guide-filter-chips">
+    <div class="toggle-chip active" onclick="filterGuides('all', this)">All</div>
+    <div class="toggle-chip" onclick="filterGuides('housing', this)">Housing</div>
+    <div class="toggle-chip" onclick="filterGuides('lighting', this)">Lighting</div>
+    <div class="toggle-chip" onclick="filterGuides('bathing', this)">Bathing</div>
+    <div class="toggle-chip" onclick="filterGuides('hibernation', this)">Hibernation</div>
+    <div class="toggle-chip" onclick="filterGuides('behaviour', this)">Behaviour</div>
+  </div>
+  <div id="guides-container"></div>
+</div>
+
+<!-- ── BOTTOM NAV ── -->
+<nav>
+  <button class="nav-btn active" id="nav-home" onclick="showPage('home')">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><polyline points="9,22 9,12 15,12 15,22" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Home
+  </button>
+  <button class="nav-btn" id="nav-schedule" onclick="showPage('schedule')">
+    <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="18" rx="2" stroke="currentColor" stroke-width="1.8"/><line x1="16" y1="2" x2="16" y2="6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><line x1="8" y1="2" x2="8" y2="6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><line x1="3" y1="10" x2="21" y2="10" stroke="currentColor" stroke-width="1.8"/></svg>
+    Schedule
+  </button>
+  <button class="nav-btn" id="nav-feeding" onclick="showPage('feeding')">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z" stroke="currentColor" stroke-width="1.8"/><path d="M8 12c0 2.21 1.79 4 4 4s4-1.79 4-4-1.79-4-4-4-4 1.79-4 4z" stroke="currentColor" stroke-width="1.8"/></svg>
+    Feeding
+  </button>
+  <button class="nav-btn" id="nav-health" onclick="showPage('health')">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M22 12h-4l-3 9L9 3l-3 9H2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Health
+  </button>
+  <button class="nav-btn" id="nav-guides" onclick="showPage('guides')">
+    <svg viewBox="0 0 24 24" fill="none"><path d="M4 19.5A2.5 2.5 0 016.5 17H20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 014 19.5v-15A2.5 2.5 0 016.5 2z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+    Guides
+  </button>
+</nav>
+
+<!-- ── AVATAR PICKER ── -->
+<input type="file" id="avatar-file-input" accept="image/*" style="display:none" onchange="handleAvatarUpload(event)">
+
+<div class="modal-overlay" id="avatar-modal-overlay">
+  <div class="modal">
+    <div class="modal-title">Change Photo</div>
+    <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:16px;">
+      <button class="btn btn-primary btn-block" onclick="document.getElementById('avatar-file-input').click()">📷 Choose from gallery</button>
+      <button class="btn btn-secondary btn-block" id="remove-avatar-btn" onclick="removeAvatar()" style="display:none">🗑️ Remove photo</button>
+    </div>
+    <button class="btn btn-secondary btn-block" onclick="closeModal('avatar-modal-overlay')">Cancel</button>
+  </div>
+</div>
+
+<!-- ── ADD TASK MODAL ── -->
+<div class="modal-overlay" id="add-task-modal-overlay">
+  <div class="modal">
+    <div class="modal-title">Add Custom Task</div>
+    <div class="form-group">
+      <label class="form-label">Task name</label>
+      <input type="text" id="new-task-name" placeholder="e.g. Clean water bowl">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Frequency</label>
+      <select id="new-task-freq">
+        <option value="daily">Daily</option>
+        <option value="2days">Every 2 days</option>
+        <option value="weekly">Weekly</option>
+        <option value="fortnightly">Fortnightly</option>
+        <option value="monthly">Monthly</option>
+        <option value="custom">Custom note</option>
+      </select>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Notes (optional)</label>
+      <input type="text" id="new-task-notes" placeholder="Any extra detail">
+    </div>
+    <div class="form-row" style="margin-top:8px;">
+      <button class="btn btn-secondary" onclick="closeModal('add-task-modal-overlay')">Cancel</button>
+      <button class="btn btn-primary" onclick="addCustomTask()">Add Task</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── NAME MODAL ── -->
+<div id="name-modal-overlay">
+  <div id="name-modal">
+    <div class="modal-title" style="font-family:'Playfair Display',serif;font-size:18px;margin-bottom:14px;">Name your tortoise</div>
+    <input type="text" id="name-input" placeholder="Enter name..." style="margin-bottom:12px;">
+    <div class="form-row">
+      <button class="btn btn-secondary" onclick="closeNameModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveName()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ══════════════════════════════════════════
+//  STATE & STORAGE
+// ══════════════════════════════════════════
+let state = {
+  name: 'My Tortoise',
+  tasks: [],
+  taskHistory: [],
+  feedings: [],
+  healthLog: [],
+  startDate: new Date().toISOString().split('T')[0]
+};
+
+// ══════════════════════════════════════════
+//  FIREBASE BRIDGE
+// ══════════════════════════════════════════
+let firebaseReady = false;
+let syncDebounceTimer = null;
+
+// Expose app state getter for Firebase module
+window._appState = () => state;
+window._syncStatus = 'signed-out';
+
+window._onSyncStatus = function(status) {
+  const dot = document.getElementById('sync-dot');
+  const label = document.getElementById('sync-label');
+  if (!dot || !label) return;
+  dot.className = 'sync-dot ' + status;
+  const labels = {
+    'synced': 'Synced',
+    'saving': 'Saving...',
+    'loading': 'Loading...',
+    'error': 'Sync error',
+    'signed-out': 'Not signed in',
+    'signing-in': 'Signing in...'
+  };
+  label.textContent = labels[status] || status;
+};
+
+window._onSignIn = function(user) {
+  const el = document.getElementById('sync-action');
+  if (!el) return;
+  const photoEl = user.photo ? `<img class="sync-user-photo" src="${user.photo}" alt="">` : '';
+  el.innerHTML = `<div class="sync-user">${photoEl}<span style="font-size:12px;color:var(--text-mid);max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${user.name||user.email}</span><button class="sync-btn" onclick="fbSignOut()">Sign out</button></div>`;
+  document.getElementById('setup-banner') && (document.getElementById('setup-banner').style.display = 'none');
+};
+
+window._onSignOut = function() {
+  const el = document.getElementById('sync-action');
+  if (!el) return;
+  el.innerHTML = `<button class="sync-btn sign-in" onclick="fbSignIn()"><svg class="google-icon" viewBox="0 0 24 24"><path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/><path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/><path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z" fill="#FBBC05"/><path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/></svg>Sign in with Google</button>`;
+};
+
+window._mergeCloudState = function(cloudData) {
+  // Merge cloud data into local state — cloud wins for most fields
+  const localAvatar = state.avatarImg;
+  state = { ...state, ...cloudData };
+  if (localAvatar && !cloudData.avatarImg) state.avatarImg = localAvatar;
+  localStorage.setItem('tortoise_state', JSON.stringify(state));
+};
+
+window._setAvatarImg = function(img) {
+  state.avatarImg = img;
+  localStorage.setItem('tortoise_state', JSON.stringify(state));
+  applyAvatar();
+};
+
+window._onRemoteUpdate = function() {
+  // Re-render current page with fresh data
+  renderPage(currentPage);
+  renderHome();
+  document.getElementById('tortoise-name-display').textContent = state.name;
+  applyAvatar();
+};
+
+function fbSignIn() {
+  if (window._fb) window._fb.signIn();
+  else alert('Firebase not configured yet. See the setup instructions below.');
+}
+function fbSignOut() {
+  if (window._fb) window._fb.signOut();
+}
+
+// ══════════════════════════════════════════
+//  STORAGE — local + cloud
+// ══════════════════════════════════════════
+function save() {
+  localStorage.setItem('tortoise_state', JSON.stringify(state));
+  // Debounced cloud push — waits 2s after last change
+  if (window._fb && window._syncStatus !== 'signed-out') {
+    clearTimeout(syncDebounceTimer);
+    syncDebounceTimer = setTimeout(() => {
+      window._fb.pushToCloud();
+    }, 2000);
+  }
+}
+
+function load() {
+  const raw = localStorage.getItem('tortoise_state');
+  if (raw) { try { state = { ...state, ...JSON.parse(raw) }; } catch(e){} }
+}
+
+// ══════════════════════════════════════════
+//  DEFAULT TASKS
+// ══════════════════════════════════════════
+const DEFAULT_TASKS = [
+  { id: 'bath', name: 'Bath', freq: '3x/week', freqDays: 2, icon: '🛁', notes: 'Luke-warm water, depth to chin, 15–20 mins' },
+  { id: 'feed', name: 'Feed', freq: 'Daily (rest 1 day/wk)', freqDays: 1, icon: '🌿', notes: 'After basking. Varied weeds + calcium' },
+  { id: 'uvb', name: 'Check UVB & heat lamp', freq: 'Daily', freqDays: 1, icon: '☀️', notes: 'Basking 35–40°C, cool end 20–25°C' },
+  { id: 'water', name: 'Fresh water / water bowl', freq: 'Daily', freqDays: 1, icon: '💧', notes: 'Some tortoises drink from bowls' },
+  { id: 'enclosure', name: 'Spot-clean enclosure', freq: 'Daily', freqDays: 1, icon: '🧹', notes: 'Remove droppings, uneaten food' },
+  { id: 'deeptidy', name: 'Deep clean enclosure', freq: 'Monthly', freqDays: 30, icon: '🏠', notes: 'Full substrate change + disinfect with F10 or similar' },
+  { id: 'weigh', name: 'Weigh tortoise', freq: 'Monthly', freqDays: 30, icon: '⚖️', notes: 'Log in Health tab. Steady gain = healthy' },
+  { id: 'uvb_replace', name: 'Check UVB lamp age', freq: 'Every 6 months', freqDays: 180, icon: '💡', notes: 'UVB output drops before visible light fails. Replace at 6–12 months' },
+];
+
+function initTasks() {
+  if (state.tasks.length === 0) {
+    state.tasks = DEFAULT_TASKS.map(t => ({
+      ...t, custom: false, hidden: false,
+      lastDone: null
+    }));
+    save();
+  } else {
+    state.tasks.forEach(t => { if (t.hidden === undefined) t.hidden = false; });
+  }
+}
+
+function toggleHideTask(id) {
+  const t = state.tasks.find(x => x.id === id);
+  if (!t) return;
+  t.hidden = !t.hidden;
+  save();
+  renderSchedule();
+  renderHome();
+}
+
+function deleteCustomTask(id) {
+  state.tasks = state.tasks.filter(x => x.id !== id);
+  save();
+  renderSchedule();
+  renderHome();
+}
+
+// ══════════════════════════════════════════
+//  DATE HELPERS
+// ══════════════════════════════════════════
+function today() { return new Date().toISOString().split('T')[0]; }
+function fmtDate(d) {
+  if (!d) return '—';
+  const dt = new Date(d + 'T12:00:00');
+  const now = new Date(); now.setHours(12,0,0,0);
+  const diff = Math.round((now - dt) / 86400000);
+  if (diff === 0) return 'Today';
+  if (diff === 1) return 'Yesterday';
+  if (diff < 7) return diff + 'd ago';
+  return dt.toLocaleDateString('en-GB', { day:'numeric', month:'short' });
+}
+function daysSince(d) {
+  if (!d) return 999;
+  const dt = new Date(d + 'T12:00:00');
+  const now = new Date(); now.setHours(12,0,0,0);
+  return Math.round((now - dt) / 86400000);
+}
+
+// ══════════════════════════════════════════
+//  NAVIGATION
+// ══════════════════════════════════════════
+let currentPage = 'home';
+function showPage(p) {
+  document.querySelectorAll('.page').forEach(el => el.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(el => el.classList.remove('active'));
+  document.getElementById('page-' + p).classList.add('active');
+  document.getElementById('nav-' + p).classList.add('active');
+  currentPage = p;
+  renderPage(p);
+}
+function renderPage(p) {
+  if (p === 'home') renderHome();
+  else if (p === 'schedule') renderSchedule();
+  else if (p === 'feeding') renderFeeding();
+  else if (p === 'health') renderHealth();
+  else if (p === 'guides') renderGuides();
+}
+
+// ══════════════════════════════════════════
+//  HOME
+// ══════════════════════════════════════════
+function renderHome() {
+  document.getElementById('today-label').innerHTML =
+    '<strong>' + new Date().toLocaleDateString('en-GB',{weekday:'long',day:'numeric',month:'long'}) + '</strong>';
+
+  // Hibernate banner
+  const month = new Date().getMonth() + 1;
+  const hb = document.getElementById('hibernate-banner-wrap');
+  if (month >= 9 && month <= 10) {
+    hb.innerHTML = `<div class="hibernate-banner"><div class="hibernate-icon">❄️</div><div class="hibernate-text"><h3>Hibernation approaching</h3><p>Begin wind-down now. Stop feeding ~4–6 weeks before hibernation starts.</p></div></div>`;
+  } else if (month >= 11 || month <= 2) {
+    hb.innerHTML = `<div class="hibernate-banner"><div class="hibernate-icon">💤</div><div class="hibernate-text"><h3>Hibernation season</h3><p>If hibernating, check on your tortoise periodically. Keep at 3–7°C.</p></div></div>`;
+  } else if (month >= 3 && month <= 4) {
+    hb.innerHTML = `<div class="hibernate-banner" style="background:linear-gradient(135deg,#5a8c42,#7ab55a)"><div class="hibernate-icon">🌱</div><div class="hibernate-text"><h3>Spring wake-up time!</h3><p>Warm up gradually. Offer bath before first food. Start UVB immediately.</p></div></div>`;
+  } else { hb.innerHTML = ''; }
+
+  // Daily tasks
+  const dl = document.getElementById('daily-tasks-list');
+  const daily = state.tasks.filter(t => t.freqDays <= 2 && !t.hidden);
+  dl.innerHTML = daily.map(t => taskItemHTML(t, true)).join('') || '<div class="empty">No daily tasks</div>';
+
+  // Upcoming
+  const ul = document.getElementById('upcoming-tasks-list');
+  ul.innerHTML = state.tasks.filter(t => t.freqDays > 2 && !t.hidden).map(t => taskItemHTML(t, false)).join('') || '<div class="empty">No upcoming tasks</div>';
+
+  // Stats
+  const feedings = state.feedings;
+  const lastFeed = feedings.length ? fmtDate(feedings[feedings.length-1].date) : '—';
+  document.getElementById('stat-last-fed').textContent = lastFeed;
+
+  const baths = state.taskHistory.filter(h => h.taskId === 'bath');
+  const lastBath = baths.length ? fmtDate(baths[baths.length-1].date) : '—';
+  document.getElementById('stat-last-bath').textContent = lastBath;
+
+  document.getElementById('stat-health-count').textContent = state.healthLog.length;
+
+  const start = new Date(state.startDate); const now = new Date();
+  const days = Math.max(0, Math.round((now - start) / 86400000));
+  document.getElementById('stat-days-tracked').textContent = days;
+}
+
+let manageMode = false;
+
+function taskItemHTML(t, showDoneBtn) {
+  if (manageMode) {
+    const isHidden = t.hidden;
+    return `<div class="task-item" style="opacity:${isHidden?'0.5':'1'}">
+      <div style="flex:1">
+        <div class="task-label">${t.icon} ${t.name}</div>
+        <div style="font-size:11px;color:var(--text-soft);margin-top:2px">${t.notes||''}</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button onclick="toggleHideTask('${t.id}')" style="padding:5px 12px;border-radius:20px;border:1.5px solid ${isHidden?'var(--green-light)':'var(--border)'};background:${isHidden?'var(--green-pale)':'var(--surface-2)'};color:${isHidden?'var(--green-deep)':'var(--text-soft)'};font-size:12px;font-family:inherit;cursor:pointer;">${isHidden?'Show':'Hide'}</button>
+        ${t.custom ? `<button onclick="deleteCustomTask('${t.id}')" style="padding:5px 10px;border-radius:20px;border:1.5px solid var(--red-pale);background:var(--red-pale);color:var(--red);font-size:12px;font-family:inherit;cursor:pointer;">Delete</button>` : ''}
+      </div>
+    </div>`;
+  }
+  const done = t.lastDone === today();
+  const overdue = !done && t.freqDays <= 7 && daysSince(t.lastDone) >= t.freqDays + 1;
+  return `<div class="task-item">
+    <div class="task-check ${done?'done':''}" onclick="toggleTask('${t.id}')"></div>
+    <div style="flex:1">
+      <div class="task-label ${done?'done':''}">${t.icon} ${t.name}</div>
+      <div style="font-size:11px;color:var(--text-soft);margin-top:2px">${t.notes||''}</div>
+    </div>
+    <div>
+      <div class="task-freq">${t.freq}</div>
+      ${t.lastDone ? `<div style="font-size:11px;color:var(--text-soft);text-align:right;margin-top:2px">${fmtDate(t.lastDone)}</div>` : ''}
+      ${overdue ? `<div class="task-overdue">Overdue</div>` : ''}
+    </div>
+  </div>`;
+}
+
+function toggleTask(id) {
+  const t = state.tasks.find(x => x.id === id);
+  if (!t) return;
+  const tod = today();
+  if (t.lastDone === tod) {
+    t.lastDone = null;
+    state.taskHistory = state.taskHistory.filter(h => !(h.taskId === id && h.date === tod));
+  } else {
+    t.lastDone = tod;
+    state.taskHistory.push({ taskId: id, taskName: t.name, date: tod });
+  }
+  save(); renderHome(); if (currentPage === 'schedule') renderSchedule();
+}
+
+// ══════════════════════════════════════════
+//  SCHEDULE
+// ══════════════════════════════════════════
+let schedCurrentTab = 'tasks';
+function schedTab(tab) {
+  schedCurrentTab = tab;
+  document.getElementById('sched-tasks-panel').style.display = tab === 'tasks' ? '' : 'none';
+  document.getElementById('sched-log-panel').style.display = tab === 'log' ? '' : 'none';
+  document.getElementById('sched-tab-tasks').className = 'tab' + (tab==='tasks'?' active':'');
+  document.getElementById('sched-tab-log').className = 'tab' + (tab==='log'?' active':'');
+  renderSchedule();
+}
+
+function toggleManageMode() {
+  manageMode = !manageMode;
+  const btn = document.getElementById('manage-btn');
+  if (btn) btn.textContent = manageMode ? 'Done' : 'Manage Tasks';
+  if (btn) btn.style.background = manageMode ? 'var(--green-pale)' : '';
+  if (btn) btn.style.color = manageMode ? 'var(--green-deep)' : '';
+  renderSchedule();
+}
+
+function renderSchedule() {
+  const el = document.getElementById('all-tasks-list');
+  const visibleCount = state.tasks.filter(t => !t.hidden).length;
+  const hiddenCount = state.tasks.filter(t => t.hidden).length;
+  const headerHtml = manageMode && hiddenCount > 0
+    ? `<div style="font-size:12px;color:var(--text-soft);margin-bottom:10px;padding:6px 10px;background:var(--surface-2);border-radius:var(--radius-sm);">Showing all ${state.tasks.length} tasks — ${hiddenCount} hidden from home</div>`
+    : !manageMode && hiddenCount > 0
+    ? `<div style="font-size:12px;color:var(--text-soft);margin-bottom:10px;padding:6px 10px;background:var(--surface-2);border-radius:var(--radius-sm);">${hiddenCount} task${hiddenCount>1?'s':''} hidden — tap Manage to change</div>`
+    : '';
+  const visibleTasks = manageMode ? state.tasks : state.tasks.filter(t => !t.hidden);
+  el.innerHTML = headerHtml + visibleTasks.map(t => taskItemHTML(t, true)).join('');
+
+  const hl = document.getElementById('task-history-list');
+  const sorted = [...state.taskHistory].reverse().slice(0, 40);
+  hl.innerHTML = sorted.length ? sorted.map(h =>
+    `<div class="food-log-entry"><div><div style="font-size:14px">${h.taskName}</div><div class="food-log-time">${fmtDate(h.date)}</div></div><span class="badge badge-green">Done</span></div>`
+  ).join('') : '<div class="empty"><div class="empty-icon">📋</div>No history yet</div>';
+}
+
+function openAddTask() {
+  document.getElementById('add-task-modal-overlay').classList.add('open');
+}
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+}
+function addCustomTask() {
+  const name = document.getElementById('new-task-name').value.trim();
+  if (!name) return;
+  const freq = document.getElementById('new-task-freq').value;
+  const notes = document.getElementById('new-task-notes').value.trim();
+  const freqMap = { daily:1, '2days':2, weekly:7, fortnightly:14, monthly:30, custom:7 };
+  const freqLabel = { daily:'Daily', '2days':'Every 2 days', weekly:'Weekly', fortnightly:'Fortnightly', monthly:'Monthly', custom:'Custom' };
+  state.tasks.push({
+    id: 'c_' + Date.now(), name, freq: freqLabel[freq], freqDays: freqMap[freq],
+    icon: '📌', notes, custom: true, lastDone: null
+  });
+  save(); closeModal('add-task-modal-overlay');
+  document.getElementById('new-task-name').value = '';
+  document.getElementById('new-task-notes').value = '';
+  renderSchedule();
+}
+
+// ══════════════════════════════════════════
+//  FEEDING
+// ══════════════════════════════════════════
+const FOODS = [
+  { name: 'Dandelion', type: 'safe', emoji: '🌼' },
+  { name: 'Plantain', type: 'safe', emoji: '🌿' },
+  { name: 'Clover', type: 'safe', emoji: '☘️' },
+  { name: 'Sow thistle', type: 'safe', emoji: '🌱' },
+  { name: 'Mallow', type: 'safe', emoji: '🌸' },
+  { name: 'Hawkbit', type: 'safe', emoji: '🌻' },
+  { name: 'Chicory', type: 'safe', emoji: '🍃' },
+  { name: 'Opuntia cactus', type: 'safe', emoji: '🌵' },
+  { name: 'Milk thistle', type: 'safe', emoji: '🌿' },
+  { name: 'Bindweed', type: 'safe', emoji: '🍀' },
+  { name: 'Hibiscus flower', type: 'safe', emoji: '🌺' },
+  { name: 'Rose petals', type: 'safe', emoji: '🌹' },
+  { name: 'Dark kale', type: 'caution', emoji: '🥬' },
+  { name: 'Watercress', type: 'caution', emoji: '🌿' },
+  { name: 'Endive', type: 'caution', emoji: '🥗' },
+  { name: 'Rocket', type: 'caution', emoji: '🍃' },
+  { name: 'Lambs lettuce', type: 'caution', emoji: '🥬' },
+  { name: 'Cornflower', type: 'safe', emoji: '💐' },
+  { name: 'Marigold', type: 'safe', emoji: '🌼' },
+  { name: 'Calcium supplement', type: 'safe', emoji: '🦴' },
+];
+
+let selectedFood = null;
+function renderFoodChips(filter='') {
+  const container = document.getElementById('food-chips-container');
+  const filtered = FOODS.filter(f => f.name.toLowerCase().includes(filter.toLowerCase()));
+  container.innerHTML = '';
+
+  const safe = filtered.filter(f=>f.type==='safe');
+  const caution = filtered.filter(f=>f.type==='caution');
+
+  if (safe.length) {
+    container.innerHTML += `<div class="food-category-label">✅ Safe / Staple</div><div class="food-grid">${safe.map(f => foodChipHTML(f)).join('')}</div>`;
+  }
+  if (caution.length) {
+    container.innerHTML += `<div class="food-category-label">⚠️ Occasional only</div><div class="food-grid">${caution.map(f => foodChipHTML(f)).join('')}</div>`;
+  }
+}
+function foodChipHTML(f) {
+  const sel = selectedFood && selectedFood.name === f.name;
+  return `<div class="food-chip ${f.type} ${sel?'selected':''}" style="${sel?'border-width:2px;font-weight:500;':''}" onclick="selectFood('${f.name}')">${f.emoji} ${f.name}</div>`;
+}
+function selectFood(name) {
+  selectedFood = FOODS.find(f => f.name === name) || null;
+  renderFoodChips(document.getElementById('food-search').value);
+}
+function filterFoods() {
+  renderFoodChips(document.getElementById('food-search').value);
+}
+function logFeeding() {
+  if (!selectedFood) { alert('Please select a food first'); return; }
+  const notes = document.getElementById('feed-notes').value.trim();
+  state.feedings.push({ food: selectedFood.name, emoji: selectedFood.emoji, notes, date: today(), time: new Date().toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit'}) });
+  selectedFood = null;
+  document.getElementById('feed-notes').value = '';
+  save();
+  renderFeedingHistory();
+  renderFoodChips();
+  renderHome();
+}
+function renderFeedingHistory() {
+  const el = document.getElementById('feeding-history');
+  const recent = [...state.feedings].reverse().slice(0, 30);
+  el.innerHTML = recent.length ? recent.map(f =>
+    `<div class="food-log-entry"><div><div style="font-size:14px">${f.emoji} ${f.food}${f.notes?' <span style="color:var(--text-soft);font-size:12px">— '+f.notes+'</span>':''}</div><div class="food-log-time">${fmtDate(f.date)} · ${f.time}</div></div></div>`
+  ).join('') : '<div class="empty"><div class="empty-icon">🌿</div>No feedings logged yet</div>';
+}
+
+let feedCurrentTab = 'log';
+function feedTab(tab) {
+  feedCurrentTab = tab;
+  document.getElementById('feed-log-panel').style.display = tab==='log' ? '' : 'none';
+  document.getElementById('feed-guide-panel').style.display = tab==='guide' ? '' : 'none';
+  document.getElementById('feed-tab-log').className = 'tab' + (tab==='log'?' active':'');
+  document.getElementById('feed-tab-guide').className = 'tab' + (tab==='guide'?' active':'');
+}
+function renderFeeding() {
+  renderFoodChips();
+  renderFeedingHistory();
+}
+
+// ══════════════════════════════════════════
+//  HEALTH LOG
+// ══════════════════════════════════════════
+let healthCurrentTab = 'log';
+function healthTab(tab) {
+  healthCurrentTab = tab;
+  ['log','history','signs'].forEach(t => {
+    document.getElementById('health-'+t+'-panel').style.display = t===tab?'':'none';
+    document.getElementById('health-tab-'+t).className = 'tab'+(t===tab?' active':'');
+  });
+  if (tab==='history') renderHealthHistory();
+}
+function renderHealth() {
+  document.getElementById('health-date').value = today();
+  renderHealthHistory();
+}
+function addHealthEntry() {
+  const cat = document.getElementById('health-category').value;
+  const date = document.getElementById('health-date').value || today();
+  const weight = document.getElementById('health-weight').value;
+  const notes = document.getElementById('health-notes').value.trim();
+  if (!notes && !weight) { alert('Please add a note or weight'); return; }
+  const catLabels = { general:'Observation', weight:'Weight', eating:'Eating', activity:'Activity', eyes:'Eyes/Nose', shell:'Shell', stools:'Droppings', vet:'Vet Visit', medication:'Medication', concern:'Concern' };
+  const dotClass = cat === 'concern' || cat === 'vet' || cat === 'medication' ? (cat==='vet'?'vet':'concern') : 'good';
+  state.healthLog.push({ id: Date.now(), cat, catLabel: catLabels[cat]||cat, date, weight: weight||null, notes, dotClass });
+  document.getElementById('health-notes').value = '';
+  document.getElementById('health-weight').value = '';
+  save(); renderHealthHistory(); renderHome();
+}
+function renderHealthHistory() {
+  const el = document.getElementById('health-entries-list');
+  const sorted = [...state.healthLog].reverse();
+  el.innerHTML = sorted.length ? sorted.map(e =>
+    `<div class="health-entry">
+      <div class="health-dot ${e.dotClass}" style="margin-top:6px"></div>
+      <div class="health-content">
+        <div class="health-date">${fmtDate(e.date)}${e.weight?' · '+e.weight+'g':''}</div>
+        <div class="health-note">${e.notes||''}</div>
+        <div class="health-category">${e.catLabel}</div>
+      </div>
+    </div>`
+  ).join('') : '<div class="empty"><div class="empty-icon">❤️</div>No health entries yet</div>';
+}
+
+// ══════════════════════════════════════════
+//  GUIDES
+// ══════════════════════════════════════════
+const GUIDES = [
+  { tag: 'housing', icon: '🏠', title: 'Enclosure & Housing', content: `
+    <p><strong>Horsefields (Testudo horsfieldii)</strong> need a tortoise table or large vivarium. A glass vivarium is acceptable if well-ventilated but open-topped tables are preferable for adults.</p>
+    <br>
+    <p><strong>Minimum sizes:</strong></p>
+    <table class="info-table"><tr><td>Hatchling/Juvenile</td><td>90×60cm</td></tr><tr><td>Adult (up to 25cm)</td><td>120×90cm minimum. Bigger is always better.</td></tr><tr><td>Outdoor enclosure</td><td>As large as possible. Secure escape-proof walls 40cm+ high, sunk into the ground 30cm to prevent burrowing out.</td></tr></table>
+    <br>
+    <p><strong>Substrate:</strong> A 50/50 mix of <strong>topsoil and play sand</strong> is ideal — 8–10cm deep to allow burrowing. Horsefields are prolific diggers. Avoid: wood chip, bark, moss, pure sand, coir (retains too much moisture).</p>
+    <br>
+    <div class="warn">Horsefields come from dry Asian steppes. They need a <strong>dry environment</strong>. High humidity causes respiratory infections. Do not mist the enclosure.</div>
+    <br>
+    <p><strong>Hides:</strong> Provide at least one hide at the cool end. A cork bark round or half-log works well. Tortoises need to feel secure.</p>
+    <p><strong>Water dish:</strong> Shallow dish with water 1cm deep (too deep can drown a small tortoise). Change daily.</p>
+    <p><strong>Temperature gradient:</strong> Essential. The tortoise must be able to thermoregulate.</p>
+    <table class="info-table">
+      <tr><td>Basking spot</td><td>35–40°C directly under lamp</td></tr>
+      <tr><td>Cool end</td><td>20–25°C</td></tr>
+      <tr><td>Night time (no heat needed)</td><td>Can drop to 15°C — natural and healthy</td></tr>
+    </table>
+  `},
+  { tag: 'lighting', icon: '☀️', title: 'Lighting & UV Requirements', content: `
+    <p>Horsefields are native to Central Asia and get intense, direct sunlight. Lighting is <strong>critical for their survival</strong> — not optional.</p>
+    <br>
+    <p><strong>UVB lighting:</strong> You MUST provide UVB light. Without it, tortoises cannot synthesise Vitamin D3, which leads to Metabolic Bone Disease (MBD) — soft shells, deformities, and death.</p>
+    <table class="info-table">
+      <tr><td>Type</td><td>Linear T5 HO UVB tube (preferred) or T8</td></tr>
+      <tr><td>UVB strength</td><td>Arcadia 12% or Reptisun 10% — a high output</td></tr>
+      <tr><td>Distance</td><td>T5: 30–45cm from basking area. T8: 25–30cm.</td></tr>
+      <tr><td>Duration</td><td>10–14 hours/day in summer, 10 hours in winter</td></tr>
+      <tr><td>Replacement</td><td>Every 6–12 months even if lamp still glows</td></tr>
+    </table>
+    <br>
+    <div class="danger">UVB output degrades long before the lamp visibly fails. A lamp that still glows may produce NO useful UVB. Set a reminder to replace it.</div>
+    <br>
+    <p><strong>Basking lamp:</strong> A simple incandescent or halogen bulb (40–60W typically) provides the basking hot spot. Position at one end only to create the temperature gradient.</p>
+    <p><strong>Photoperiod:</strong> The light/dark cycle triggers feeding, activity, and reproductive behaviour. Use a timer. Mimicking natural daylight hours is beneficial.</p>
+    <div class="good">Natural sunlight is the best UV source. Supervised outdoor time on warm sunny days is excellent. Glass and plastic block UVB — don't put a tortoise behind glass in the sun.</div>
+  `},
+  { tag: 'bathing', icon: '🛁', title: 'Bathing & Hydration', content: `
+    <p>Bathing is one of the most important care tasks for Horsefields. They absorb water through their cloaca as well as drink.</p>
+    <br>
+    <p><strong>How to bathe:</strong></p>
+    <ul>
+      <li>Use lukewarm water — approximately 30°C (comfortably warm to the wrist)</li>
+      <li>Depth should reach the tortoise's chin — never above the neck</li>
+      <li>Duration: <strong>15–20 minutes</strong></li>
+      <li>A plastic tub or washing-up bowl is ideal</li>
+      <li>Let the tortoise walk in freely; don't force or hold it under</li>
+      <li>Do not add soap, chamomile tea, or anything else — plain water only</li>
+      <li>Supervise at all times</li>
+      <li>Dry gently with a soft cloth before returning to enclosure</li>
+    </ul>
+    <br>
+    <table class="info-table">
+      <tr><td>Adults</td><td>3× per week minimum</td></tr>
+      <tr><td>Juveniles / Hatchlings</td><td>Daily</td></tr>
+      <tr><td>Sick or dehydrated</td><td>Daily until recovered</td></tr>
+      <tr><td>Pre-hibernation</td><td>Increase to daily for 2 weeks before hibernation</td></tr>
+      <tr><td>Post-hibernation</td><td>Daily for first 1–2 weeks after waking</td></tr>
+    </table>
+    <br>
+    <div class="warn">Orange or yellow urates (the white chalky part of droppings) indicate dehydration. Increase bathing frequency and check water access.</div>
+    <div class="good">Many tortoises will defecate in bath water — this is normal and healthy. It helps clear the digestive tract. Always empty and rinse the bath if this happens.</div>
+  `},
+  { tag: 'hibernation', icon: '❄️', title: 'Hibernation Guide', content: `
+    <p>Horsefields are obligate hibernators from Central Asia. In the wild they hibernate for 5–6 months. In captivity a 3–4 month hibernation (October–February in the UK) is recommended for healthy adults.</p>
+    <br>
+    <div class="danger">Do NOT hibernate a tortoise that: is underweight, has been sick, is under 3 years old, has not passed the Jackson Ratio test, or that you have concerns about. Contact a reptile vet if unsure.</div>
+    <br>
+    <p><strong>Jackson Ratio:</strong> A weight-to-length ratio check. A tortoise must have enough fat reserves to survive hibernation. Use a tortoise calculator app or ask a reptile vet.</p>
+    <br>
+    <p><strong>Pre-hibernation wind-down (6–8 weeks before):</strong></p>
+    <ul>
+      <li>Reduce feeding — stop feeding entirely 4–6 weeks before hibernation</li>
+      <li>Ensure the gut is completely empty (undigested food rots during hibernation)</li>
+      <li>Keep lighting and heating on — let the tortoise continue to bask and defecate</li>
+      <li>Bathe daily for 2 weeks before hibernation to ensure hydration and emptied gut</li>
+      <li>When not eating and gut is clear, begin cooling the enclosure gradually</li>
+    </ul>
+    <br>
+    <p><strong>During hibernation:</strong></p>
+    <table class="info-table">
+      <tr><td>Temperature</td><td>3–7°C constant. Below 3°C risks death from freezing; above 10°C tortoise burns reserves too fast.</td></tr>
+      <tr><td>Location</td><td>Unheated shed, garage or fridge. NOT indoors in central heating.</td></tr>
+      <tr><td>Container</td><td>Wooden box with ventilation holes, filled with soil/leaf litter mix or dry soil. Cardboard box inside for insulation.</td></tr>
+      <tr><td>Monitoring</td><td>Check every 2 weeks. Weigh monthly. A loss of more than 1% body weight per month is concerning.</td></tr>
+      <tr><td>Humidity</td><td>Keep slightly damp substrate to prevent dehydration.</td></tr>
+    </table>
+    <br>
+    <p><strong>Waking up:</strong></p>
+    <ul>
+      <li>Move to room temperature (not heated enclosure yet)</li>
+      <li>Bathe every day for the first 1–2 weeks</li>
+      <li>Do not force-feed</li>
+      <li>Begin lighting and heat once active</li>
+      <li>First meal after first defecation post-hibernation</li>
+    </ul>
+    <div class="warn">UK timing: Begin wind-down in September/October. Wake up in February/March depending on weight and temperature.</div>
+  `},
+  { tag: 'behaviour', icon: '🐢', title: 'Behaviour & Psychology', content: `
+    <p>Understanding normal tortoise behaviour helps you spot problems early and improve welfare.</p>
+    <br>
+    <p><strong>Normal behaviour:</strong></p>
+    <ul>
+      <li><strong>Basking:</strong> This is critical for thermoregulation and digestion. A tortoise should bask for 1–3 hours each morning.</li>
+      <li><strong>Burrowing:</strong> Horsefields burrow extensively — they may spend hours digging or sitting partly buried. This is completely normal.</li>
+      <li><strong>Ramming:</strong> Males will ram walls, other tortoises, or objects. Normal behaviour.</li>
+      <li><strong>Head bobbing:</strong> Territorial or mating behaviour in males.</li>
+      <li><strong>Hissing when handled:</strong> Normal — it's just air being displaced as limbs retract.</li>
+      <li><strong>Righting reflex testing:</strong> Gently placed on their back, a healthy tortoise will right themselves quickly.</li>
+    </ul>
+    <br>
+    <p><strong>Enrichment ideas:</strong></p>
+    <ul>
+      <li>Varied substrate levels — hills and dips to explore</li>
+      <li>Scatter weeds in different areas to encourage foraging</li>
+      <li>Logs, rocks, and cork bark to navigate around</li>
+      <li>Supervised garden time in warm weather</li>
+    </ul>
+    <br>
+    <div class="warn">Horsefields are solitary and do not require companionship. Housing two tortoises together risks injury, stress, and disease transmission — especially mixed sexes outside of supervised breeding.</div>
+    <br>
+    <p><strong>Handling:</strong> Keep sessions short (5–10 mins). Always support the full body weight. Wash hands before and after. Frequent handling can cause stress — read the individual tortoise's behaviour.</p>
+  `},
+  { tag: 'housing', icon: '🌡️', title: 'Temperature & Heating', content: `
+    <p>Tortoises are ectothermic — they cannot generate their own body heat. Temperature management is arguably the single most important husbandry factor.</p>
+    <br>
+    <table class="info-table">
+      <tr><td>Basking spot</td><td>35–40°C</td></tr>
+      <tr><td>Warm end ambient</td><td>28–32°C</td></tr>
+      <tr><td>Cool end</td><td>20–25°C</td></tr>
+      <tr><td>Night time drop</td><td>15–18°C — beneficial, mimics nature</td></tr>
+    </table>
+    <br>
+    <p><strong>Equipment:</strong></p>
+    <ul>
+      <li>Use a <strong>temperature gun / digital spot thermometer</strong> to verify basking spot. Do not rely on guesswork.</li>
+      <li>Basking lamp: halogen or incandescent bulb. Not a CHE (ceramic heat emitter) as this produces no light.</li>
+      <li>Do not use heat mats — tortoises thermoregulate from above, not below. Heat mats can cause burns.</li>
+      <li>A thermostat is not normally needed for basking lamps if positioned correctly — adjust height to reach correct temperature.</li>
+    </ul>
+    <div class="danger">A tortoise that is too cold will not eat, digest, or behave normally. Chronic cold = slow death. Check temperatures daily.</div>
+  `},
+  { tag: 'behaviour', icon: '🥚', title: 'Egg Laying & Breeding', content: `
+    <p>Even females kept alone can lay infertile eggs. This is important to know.</p>
+    <br>
+    <p><strong>Signs of egg-laying:</strong></p>
+    <ul>
+      <li>Restlessness, pacing, trying to escape</li>
+      <li>Digging persistently in corners</li>
+      <li>Loss of appetite before laying</li>
+      <li>Laying season: late spring to mid-summer in the UK</li>
+    </ul>
+    <br>
+    <p><strong>What to do:</strong></p>
+    <ul>
+      <li>Provide a deep (15cm+) area of warm, damp substrate where she can dig</li>
+      <li>Do not disturb her during laying — she may abandon the nest</li>
+      <li>Once laid, remove infertile eggs (if she cannot incubate them naturally)</li>
+    </ul>
+    <br>
+    <div class="warn"><strong>Egg binding (dystocia)</strong>: If a female is straining to lay but cannot, or shows signs of distress, this is a veterinary emergency. It can be fatal without treatment.</div>
+  `},
+];
+
+let guideFilterTag = 'all';
+function filterGuides(tag, el) {
+  guideFilterTag = tag;
+  document.querySelectorAll('.toggle-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  renderGuides();
+}
+function renderGuides() {
+  const container = document.getElementById('guides-container');
+  const filtered = guideFilterTag === 'all' ? GUIDES : GUIDES.filter(g => g.tag === guideFilterTag);
+  container.innerHTML = filtered.map((g, i) => `
+    <div class="card" style="padding:0 16px;">
+      <div class="guide-item" onclick="toggleGuide('main-g${i}')">
+        <div class="guide-header"><div class="g-left"><span class="icon icon-green">${g.icon}</span> ${g.title}</div><span class="guide-arrow" id="arr-main-g${i}">▶</span></div>
+        <div class="guide-body" id="guide-main-g${i}">
+          <div class="guide-body-inner">${g.content}</div>
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function toggleGuide(id) {
+  const body = document.getElementById('guide-' + id);
+  const arrow = document.getElementById('arr-' + id);
+  if (!body) return;
+  const isOpen = body.classList.contains('open');
+  body.classList.toggle('open', !isOpen);
+  if (arrow) arrow.classList.toggle('open', !isOpen);
+}
+
+// ══════════════════════════════════════════
+//  NAME MODAL
+// ══════════════════════════════════════════
+function openNameModal() {
+  document.getElementById('name-input').value = state.name;
+  document.getElementById('name-modal-overlay').classList.add('open');
+  setTimeout(() => document.getElementById('name-input').focus(), 100);
+}
+function closeNameModal() { document.getElementById('name-modal-overlay').classList.remove('open'); }
+function saveName() {
+  const n = document.getElementById('name-input').value.trim();
+  if (!n) return;
+  state.name = n; save();
+  document.getElementById('tortoise-name-display').textContent = n;
+  closeNameModal();
+}
+
+// ══════════════════════════════════════════
+//  AVATAR
+// ══════════════════════════════════════════
+function openAvatarPicker() {
+  const removeBtn = document.getElementById('remove-avatar-btn');
+  removeBtn.style.display = state.avatarImg ? '' : 'none';
+  document.getElementById('avatar-modal-overlay').classList.add('open');
+}
+
+function handleAvatarUpload(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(ev) {
+    state.avatarImg = ev.target.result;
+    save();
+    applyAvatar();
+    closeModal('avatar-modal-overlay');
+  };
+  reader.readAsDataURL(file);
+  e.target.value = '';
+}
+
+function removeAvatar() {
+  state.avatarImg = null;
+  save();
+  applyAvatar();
+  closeModal('avatar-modal-overlay');
+}
+
+function applyAvatar() {
+  const img = document.getElementById('avatar-img');
+  const emoji = document.getElementById('avatar-emoji');
+  if (state.avatarImg) {
+    img.src = state.avatarImg;
+    img.style.display = 'block';
+    emoji.style.display = 'none';
+  } else {
+    img.style.display = 'none';
+    emoji.style.display = '';
+  }
+}
+
+// ══════════════════════════════════════════
+//  INIT
+// ══════════════════════════════════════════
+load();
+initTasks();
+renderHome();
+renderGuides();
+
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.classList.remove('open'); });
+});
+document.getElementById('name-modal-overlay').addEventListener('click', e => {
+  if (e.target === document.getElementById('name-modal-overlay')) closeNameModal();
+});
+
+// Set tortoise name from state
+document.getElementById('tortoise-name-display').textContent = state.name;
+applyAvatar();
+
+// Show setup banner if Firebase not configured
+setTimeout(() => {
+  const banner = document.getElementById('setup-banner');
+  if (!banner) return;
+  const signInBtn = document.querySelector('.sync-btn.sign-in');
+  // Detect unconfigured Firebase by checking if _fb loaded
+  if (!window._fb) {
+    banner.style.display = '';
+    if (signInBtn) signInBtn.style.opacity = '0.4';
+  }
+}, 800);
+
+// Register service worker for offline/PWA
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+}
+</script>
+</body>
+</html>
